@@ -10,3 +10,7 @@ build:
 push:
 	just build
 	docker push fasterthanlime.registry.cpln.io/refresh:latest
+
+run:
+	just build
+	docker run -p 8000:8000/tcp --rm fasterthanlime.registry.cpln.io/refresh:latest

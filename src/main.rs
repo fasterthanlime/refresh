@@ -4,6 +4,12 @@ use tokio::{process::Command, net::{TcpListener, TcpStream}};
 
 #[tokio::main]
 async fn main() {
+    tokio::spawn(async {
+        _ = tokio::signal::ctrl_c().await;
+        eprintln!("Violently shutting down");
+        std::process::exit(0);
+    });
+
     let mut cmd = Command::new("deno");
     cmd.arg("run").arg("-A").arg("main.ts");
     cmd.env("PORT", "3001");
