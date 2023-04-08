@@ -13,10 +13,7 @@ export default function Home() {
           class="w-32 h-32"
           alt="the fresh logo: a sliced lemon dripping with juice"
         />
-        <p class="my-6">
-          Hi YouTube, this is a sample fresh app, which we're now going to
-          deploy on control plane.
-        </p>
+        <p class="my-6">Hi YouTube, we're now using tokio.</p>
         <Counter start={3} />
       </div>
     </>

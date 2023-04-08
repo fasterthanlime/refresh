@@ -1,7 +1,9 @@
-use std::{process::Command, os::unix::process::CommandExt, net::TcpStream};
+use tokio::{process::Command, net::{TcpListener, TcpStream}};
 
 
-fn main() {
+
+#[tokio::main]
+async fn main() {
     let mut cmd = Command::new("deno");
     cmd.arg("run").arg("-A").arg("main.ts");
     cmd.env("PORT", "3001");
@@ -16,35 +18,23 @@ fn main() {
     }
     let mut child = cmd.spawn().unwrap();
 
-    std::thread::spawn(move || {
-        child.wait().unwrap();
+    tokio::spawn(async move {
+        child.wait().await.unwrap();
     });
 
     // listen on port 8000
-    let listener = std::net::TcpListener::bind("0.0.0.0:8000").unwrap();
+    let listener = TcpListener::bind("0.0.0.0:8000").await.unwrap();
     let address = listener.local_addr().unwrap();
     println!("Actually listening on http://{address:?}");
 
     loop {
         // proxy to port 3001
-        let (downstream, addr) = listener.accept().unwrap();
+        let (mut downstream, addr) = listener.accept().await.unwrap();
         println!("Accepted connection from {addr}");
-        std::thread::spawn(move || {
-            let upstream = TcpStream::connect("127.0.0.1:3001").unwrap();
-            let mut downstream_w = downstream.try_clone().unwrap();
-            let mut downstream_r = downstream;
+        tokio::spawn(async move {
+            let mut upstream = TcpStream::connect("127.0.0.1:3001").await.unwrap();
 
-            let mut upstream_w = upstream.try_clone().unwrap();
-            let mut upstream_r = upstream;
-
-            std::thread::spawn(move || {
-                std::io::copy(&mut downstream_r, &mut upstream_w).unwrap();
-                println!("Down copying downstream->upstream");
-            });
-            std::thread::spawn(move || {
-                std::io::copy(&mut upstream_r, &mut downstream_w).unwrap();
-                println!("Down copying upstream->downstream");
-            });
+            tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await.unwrap();
         });
     }
 }
