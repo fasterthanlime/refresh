@@ -1,8 +1,6 @@
 use sqlx::postgres::PgPoolOptions;
 use tokio::{process::Command, net::{TcpListener, TcpStream}};
 
-
-
 #[tokio::main]
 async fn main() {
     tokio::spawn(async {
@@ -45,6 +43,26 @@ async fn main() {
     ).execute(&pool).await.unwrap();
 
     println!("All migrations applied");
+
+    for result in ignore::Walk::new("./") {
+        // Each item yielded by the iterator is either a directory entry or an
+        // error, so either print the path or the error.
+        match result {
+            Ok(entry) => {
+                if let Some(file_type) = entry.file_type() {
+                    if file_type.is_file() {
+                        let path = entry.path();
+                        let path = path.to_str().unwrap();
+                        let contents = tokio::fs::read(path).await.unwrap();
+                        let hash = seahash::hash(&contents[..]);
+                        let hash = format!("{:08x}", hash);
+                        println!("- found {path}#{hash}");
+                    }
+                }
+            },
+            Err(err) => println!("ERROR: {}", err),
+        }
+    }    
 
     let mut cmd = Command::new("deno");
     cmd.arg("run").arg("-A").arg("main.ts");
