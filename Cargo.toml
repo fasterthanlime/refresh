@@ -10,10 +10,11 @@ axum = { version = "0.6.12", features = ["macros"] }
 clap = { version = "4.2.1", features = ["derive"] }
 ignore = "0.4.20"
 libc = "0.2.141"
-reqwest = { version = "0.11.16", features = ["serde_json", "json"] }
+postcard = { version = "1.0.4", features = ["use-std"] }
+reqwest = { version = "0.11.16", features = [] }
 rusty_ulid = "2.0.0"
 seahash = "4.1.0"
 serde = { version = "1.0.159", features = ["derive"] }
-serde_json = "1.0.95"
+serde_bytes = "0.11.9"
 sqlx = { version = "0.6.3", features = ["postgres", "runtime-tokio-rustls"] }
 tokio = { version = "1.27.0", features = ["full"] }

@@ -1,11 +1,14 @@
-use std::{collections::HashSet, path::Path};
+use std::{collections::HashSet, fmt, path::Path};
 
 use axum::{
+    body::{Body, Bytes},
     extract::State,
+    http::Response,
     routing::post,
-    Json, Router,
+    Router,
 };
 use clap::{Parser, Subcommand};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
 use tokio::{
@@ -83,6 +86,7 @@ impl PathAndHash {
         self.parts().0
     }
 
+    #[allow(dead_code)]
     fn hash(&self) -> &str {
         self.parts().1
     }
@@ -94,12 +98,29 @@ enum ApiRequest {
         candidates: Vec<PathAndHash>,
     },
     UploadFiles {
-        files: Vec<(PathAndHash, Vec<u8>)>,
+        files: Vec<UploadedFile>,
     },
     MakeRevision {
         // revision id is generated
         files: Vec<PathAndHash>,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+struct UploadedFile {
+    pah: PathAndHash,
+    #[serde(with = "serde_bytes")]
+    contents: Vec<u8>,
+}
+
+impl fmt::Debug for UploadedFile {
+    // only show contents length
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UploadedFile")
+            .field("pah", &self.pah)
+            .field("contents_len", &self.contents.len())
+            .finish()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -120,13 +141,11 @@ async fn serve_deploy_ingest() {
 }
 
 #[axum::debug_handler]
-async fn api_post(
-    State(pool): State<PgPool>,
-    Json(payload): Json<ApiRequest>,
-) -> Json<ApiResponse> {
+async fn api_post(State(pool): State<PgPool>, payload: Bytes) -> Response<Body> {
+    let payload: ApiRequest = postcard::from_bytes(&payload[..]).unwrap();
     println!("Got payload {payload:#?}");
 
-    match payload {
+    let payload = match payload {
         ApiRequest::ListMissingFiles { candidates } => {
             let candidates: HashSet<PathAndHash> = candidates.into_iter().collect();
 
@@ -150,13 +169,13 @@ async fn api_post(
                 .collect();
             let missing: Vec<PathAndHash> = candidates.difference(&present).cloned().collect();
 
-            Json(ApiResponse::ListMissingFiles { missing })
+            ApiResponse::ListMissingFiles { missing }
         }
         ApiRequest::UploadFiles { files } => {
-            for (path_and_hash, contents) in files {
-                let path_and_hash = path_and_hash.0;
-                let contents = contents.into_boxed_slice();
-                sqlx::query("INSERT INTO files (path_and_hash, contents) VALUES ($1, $2)")
+            for uf in files {
+                let path_and_hash = uf.pah.0;
+                let contents = uf.contents.into_boxed_slice();
+                sqlx::query("INSERT INTO files (path_and_hash, data) VALUES ($1, $2)")
                     .bind(&path_and_hash)
                     .bind(&contents[..])
                     .execute(&pool)
@@ -164,34 +183,43 @@ async fn api_post(
                     .unwrap();
             }
 
-            Json(ApiResponse::UploadFiles { success: true })
+            ApiResponse::UploadFiles { success: true }
         }
         ApiRequest::MakeRevision { files } => {
             let revision_id = rusty_ulid::generate_ulid_string();
 
             for file in files {
                 // insert into revision_files
-                sqlx::query("INSERT INTO revision_files (revision_id, path_and_hash) VALUES ($1, $2)")
-                    .bind(&revision_id)
-                    .bind(&file.0)
-                    .execute(&pool)
-                    .await
-                    .unwrap();
+                sqlx::query(
+                    "INSERT INTO revision_files (revision_id, path_and_hash) VALUES ($1, $2)",
+                )
+                .bind(&revision_id)
+                .bind(&file.0)
+                .execute(&pool)
+                .await
+                .unwrap();
             }
 
-            sqlx::query("INSERT OR REPLACE INTO latest_revision (latest, revision_id) VALUES ($1, $2)")
+            sqlx::query("INSERT INTO latest_revision (latest, revision_id) VALUES ($1, $2) ON CONFLICT (latest) DO UPDATE SET revision_id = $2")
                 .bind("yes")
                 .bind(&revision_id)
                 .execute(&pool)
                 .await
                 .unwrap();
 
-            Json(ApiResponse::MakeRevision {
+            ApiResponse::MakeRevision {
                 success: true,
                 revision_id,
-            })
+            }
         }
-    }
+    };
+
+    let body = postcard::to_allocvec(&payload).unwrap();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/postcard")
+        .body(body.into())
+        .unwrap()
 }
 
 async fn serve_fresh() {
@@ -258,17 +286,23 @@ async fn deploy() {
 
     let client = reqwest::Client::new();
 
-    let response = client
-        .post(&format!("http://{}/api", deploy_ingest_address))
-        .json(&ApiRequest::ListMissingFiles {
-            candidates: candidates.clone(),
-        })
-        .send()
-        .await
-        .unwrap()
-        .json::<ApiResponse>()
-        .await
-        .unwrap();
+    let response: ApiResponse = postcard::from_bytes(
+        &client
+            .post(&format!("http://{}/api", deploy_ingest_address))
+            .body(
+                postcard::to_allocvec(&ApiRequest::ListMissingFiles {
+                    candidates: candidates.clone(),
+                })
+                .unwrap(),
+            )
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
 
     let missing = match response {
         ApiResponse::ListMissingFiles { missing } => missing,
@@ -278,21 +312,24 @@ async fn deploy() {
     let mut files = vec![];
     for f in missing {
         let contents = tokio::fs::read(f.path()).await.unwrap();
-        files.push((f, contents));
+        files.push(UploadedFile { pah: f, contents });
     }
 
     println!("Uploading {} files", files.len());
 
     // TODO: batch this
-    let response = client
-        .post(&format!("http://{}/api", deploy_ingest_address))
-        .json(&ApiRequest::UploadFiles { files })
-        .send()
-        .await
-        .unwrap()
-        .json::<ApiResponse>()
-        .await
-        .unwrap();
+    let response = postcard::from_bytes(
+        &client
+            .post(&format!("http://{}/api", deploy_ingest_address))
+            .body(postcard::to_allocvec(&ApiRequest::UploadFiles { files }).unwrap())
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
 
     match response {
         ApiResponse::UploadFiles { success } => assert!(success),
@@ -303,15 +340,18 @@ async fn deploy() {
 
     // Now make a new revision from "candidates"
 
-    let response = client
-        .post(&format!("http://{}/api", deploy_ingest_address))
-        .json(&ApiRequest::MakeRevision { files: candidates })
-        .send()
-        .await
-        .unwrap()
-        .json::<ApiResponse>()
-        .await
-        .unwrap();
+    let response = postcard::from_bytes(
+        &client
+            .post(&format!("http://{}/api", deploy_ingest_address))
+            .body(postcard::to_allocvec(&ApiRequest::MakeRevision { files: candidates }).unwrap())
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
 
     match response {
         ApiResponse::MakeRevision {
