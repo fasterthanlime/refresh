@@ -58,4 +58,4 @@ COPY --from=builder /app/refresh-proxy /app/refresh-proxy
 WORKDIR /deno-app
 COPY . /deno-app
 
-CMD ["/app/refresh-proxy"]
+CMD ["/app/refresh-proxy", "serve"]

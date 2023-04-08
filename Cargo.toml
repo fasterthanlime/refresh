@@ -6,8 +6,12 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+clap = { version = "4.2.1", features = ["derive"] }
 ignore = "0.4.20"
 libc = "0.2.141"
+reqwest = { version = "0.11.16", features = ["serde_json", "json"] }
 seahash = "4.1.0"
+serde = { version = "1.0.159", features = ["derive"] }
+serde_json = "1.0.95"
 sqlx = { version = "0.6.3", features = ["postgres", "runtime-tokio-rustls"] }
 tokio = { version = "1.27.0", features = ["full"] }
