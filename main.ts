@@ -10,4 +10,13 @@ import manifest from "./fresh.gen.ts";
 import twindPlugin from "$fresh/plugins/twind.ts";
 import twindConfig from "./twind.config.ts";
 
-await start(manifest, { plugins: [twindPlugin(twindConfig)] });
+let port = 8000;
+const portString = Deno.env.get("PORT");
+if (typeof portString !== "undefined") {
+  port = parseInt(portString, 10);
+}
+
+await start(manifest, {
+  plugins: [twindPlugin(twindConfig)],
+  port,
+});
