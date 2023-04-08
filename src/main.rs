@@ -124,6 +124,8 @@ async fn api_post(
     State(pool): State<PgPool>,
     Json(payload): Json<ApiRequest>,
 ) -> Json<ApiResponse> {
+    println!("Got payload {payload:#?}");
+
     match payload {
         ApiRequest::ListMissingFiles { candidates } => {
             let candidates: HashSet<PathAndHash> = candidates.into_iter().collect();
@@ -148,21 +150,48 @@ async fn api_post(
                 .collect();
             let missing: Vec<PathAndHash> = candidates.difference(&present).cloned().collect();
 
-            return Json(ApiResponse::ListMissingFiles { missing })
+            Json(ApiResponse::ListMissingFiles { missing })
         }
         ApiRequest::UploadFiles { files } => {
-            todo!()
+            for (path_and_hash, contents) in files {
+                let path_and_hash = path_and_hash.0;
+                let contents = contents.into_boxed_slice();
+                sqlx::query("INSERT INTO files (path_and_hash, contents) VALUES ($1, $2)")
+                    .bind(&path_and_hash)
+                    .bind(&contents[..])
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+
+            Json(ApiResponse::UploadFiles { success: true })
         }
         ApiRequest::MakeRevision { files } => {
-            todo!()
+            let revision_id = rusty_ulid::generate_ulid_string();
+
+            for file in files {
+                // insert into revision_files
+                sqlx::query("INSERT INTO revision_files (revision_id, path_and_hash) VALUES ($1, $2)")
+                    .bind(&revision_id)
+                    .bind(&file.0)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+
+            sqlx::query("INSERT OR REPLACE INTO latest_revision (latest, revision_id) VALUES ($1, $2)")
+                .bind("yes")
+                .bind(&revision_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            Json(ApiResponse::MakeRevision {
+                success: true,
+                revision_id,
+            })
         }
     }
-
-    println!("Got payload {payload:#?}");
-    Json(ApiResponse::MakeRevision {
-        success: true,
-        revision_id: "foobar".into(),
-    })
 }
 
 async fn serve_fresh() {
