@@ -10,7 +10,10 @@ use axum::{
 use clap::{Parser, Subcommand};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
+use sqlx::{
+    postgres::{PgListener, PgPoolOptions},
+    FromRow, PgPool,
+};
 use tokio::{
     net::{TcpListener, TcpStream},
     process::Command,
@@ -207,6 +210,8 @@ async fn api_post(State(pool): State<PgPool>, payload: Bytes) -> Response<Body> 
                 .await
                 .unwrap();
 
+            sqlx::query("NOTIFY revision").execute(&pool).await.unwrap();
+
             ApiResponse::MakeRevision {
                 success: true,
                 revision_id,
@@ -224,6 +229,18 @@ async fn api_post(State(pool): State<PgPool>, payload: Bytes) -> Response<Body> 
 
 async fn serve_fresh() {
     let pool = mk_pool().await;
+
+    tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            let mut listener = PgListener::connect_with(&pool).await.unwrap();
+            listener.listen("revision").await.unwrap();
+            loop {
+                let _notification = listener.recv().await.unwrap();
+                println!("Got new revision notification!");
+            }
+        }
+    });
 
     let mut cmd = Command::new("deno");
     cmd.arg("run").arg("-A").arg("main.ts");
@@ -288,7 +305,7 @@ async fn deploy() {
 
     let response: ApiResponse = postcard::from_bytes(
         &client
-            .post(&format!("http://{}/api", deploy_ingest_address))
+            .post(&format!("{}/api", deploy_ingest_address))
             .body(
                 postcard::to_allocvec(&ApiRequest::ListMissingFiles {
                     candidates: candidates.clone(),
@@ -320,7 +337,7 @@ async fn deploy() {
     // TODO: batch this
     let response = postcard::from_bytes(
         &client
-            .post(&format!("http://{}/api", deploy_ingest_address))
+            .post(&format!("{}/api", deploy_ingest_address))
             .body(postcard::to_allocvec(&ApiRequest::UploadFiles { files }).unwrap())
             .send()
             .await
@@ -342,7 +359,7 @@ async fn deploy() {
 
     let response = postcard::from_bytes(
         &client
-            .post(&format!("http://{}/api", deploy_ingest_address))
+            .post(&format!("{}/api", deploy_ingest_address))
             .body(postcard::to_allocvec(&ApiRequest::MakeRevision { files: candidates }).unwrap())
             .send()
             .await

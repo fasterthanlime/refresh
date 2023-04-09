@@ -13,4 +13,8 @@ push:
 
 run:
 	just build
-	docker run -p 8000:8000/tcp --rm fasterthanlime.registry.cpln.io/refresh:latest
+	docker run -p 8000:8000/tcp --rm \
+		--env SERVE_MODE=SERVE_FRESH \
+		--env DATABASE_URL=postgres://amos@localhost:5432/amos \
+		--network host \
+		fasterthanlime.registry.cpln.io/refresh:latest
