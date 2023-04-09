@@ -13,7 +13,9 @@ export default function Home() {
           class="w-32 h-32"
           alt="the fresh logo: a sliced lemon dripping with juice"
         />
-        <p class="my-6">Hi YouTube, we're now using tokio.</p>
+        <p class="my-6">
+          Hi YouTube, we're now using tokio. And we have working deploys.
+        </p>
         <Counter start={3} />
       </div>
     </>

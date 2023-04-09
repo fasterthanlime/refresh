@@ -1,4 +1,9 @@
-use std::{collections::HashSet, fmt, path::Path};
+use std::{
+    collections::HashSet,
+    fmt,
+    path::Path,
+    sync::{Arc, RwLock},
+};
 
 use axum::{
     body::{Body, Bytes},
@@ -227,50 +232,197 @@ async fn api_post(State(pool): State<PgPool>, payload: Bytes) -> Response<Body> 
         .unwrap()
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Deploy {
+    Blue,
+    Green,
+}
+
+impl Deploy {
+    fn listen_port(&self) -> u16 {
+        match self {
+            Deploy::Blue => 3001,
+            Deploy::Green => 3002,
+        }
+    }
+
+    fn temp_path(&self) -> &str {
+        match self {
+            Deploy::Blue => "/tmp/refresh-blue",
+            Deploy::Green => "/tmp/refresh-green",
+        }
+    }
+}
+
 async fn serve_fresh() {
+    let deploy = Arc::new(RwLock::new(Deploy::Blue));
+    let mut other_child_pid: Option<u32> = None;
+    let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+    tokio::spawn(proxy(deploy.clone()));
+
     let pool = mk_pool().await;
 
     tokio::spawn({
         let pool = pool.clone();
+        let notify_tx = notify_tx.clone();
+
         async move {
             let mut listener = PgListener::connect_with(&pool).await.unwrap();
             listener.listen("revision").await.unwrap();
             loop {
                 let _notification = listener.recv().await.unwrap();
                 println!("Got new revision notification!");
+                notify_tx.send(()).await.unwrap();
             }
         }
     });
 
-    let mut cmd = Command::new("deno");
-    cmd.arg("run").arg("-A").arg("main.ts");
-    cmd.env("PORT", "3001");
-    unsafe {
-        cmd.pre_exec(|| {
-            let ret = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            if ret != 0 {
-                panic!("prctl failed");
-            }
-            Ok(())
+    {
+        let notify_tx = notify_tx.clone();
+        tokio::spawn(async move {
+            notify_tx.send(()).await.unwrap();
         });
     }
-    let mut child = cmd.spawn().unwrap();
 
-    tokio::spawn(async move {
-        child.wait().await.unwrap();
-    });
+    loop {
+        let _ = notify_rx.recv().await;
 
-    // listen on port 8000
+        let next_deploy = {
+            let deploy = deploy.read().unwrap();
+            match &*deploy {
+                Deploy::Blue => Deploy::Green,
+                Deploy::Green => Deploy::Blue,
+            }
+        };
+
+        println!("Deploying {:?}", next_deploy);
+
+        // wipe the temp dir
+        let temp_path = next_deploy.temp_path();
+        if let Ok(true) = tokio::fs::try_exists(temp_path).await {
+            tokio::fs::remove_dir_all(next_deploy.temp_path())
+                .await
+                .unwrap();
+        }
+
+        // create the temp dir
+        tokio::fs::create_dir_all(next_deploy.temp_path())
+            .await
+            .unwrap();
+
+        // determine the latest revision
+        let revision_id = {
+            #[derive(FromRow)]
+            struct Row {
+                revision_id: String,
+            }
+
+            let row: Row =
+                sqlx::query_as("SELECT revision_id FROM latest_revision WHERE latest = 'yes'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            row.revision_id
+        };
+
+        println!("Latest revision is {}", revision_id);
+
+        // list revision files for this revision
+        let revision_files = {
+            #[derive(FromRow)]
+            struct Row {
+                path_and_hash: String,
+            }
+
+            let rows: Vec<Row> =
+                sqlx::query_as("SELECT path_and_hash FROM revision_files WHERE revision_id = $1")
+                    .bind(&revision_id)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            rows.into_iter()
+                .map(|r| PathAndHash(r.path_and_hash))
+                .collect::<Vec<_>>()
+        };
+
+        println!("Downloading {} files", revision_files.len());
+
+        // download all the files from postgres, write to the temp dir
+        {
+            #[derive(FromRow)]
+            struct Row {
+                #[allow(dead_code)]
+                path_and_hash: String,
+                data: Vec<u8>,
+            }
+
+            for pah in revision_files {
+                let row: Row = sqlx::query_as(
+                    "SELECT path_and_hash, data FROM files WHERE path_and_hash = $1",
+                )
+                .bind(&pah.0)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+                let path = Path::new(temp_path).join(pah.path());
+                if let Some(parent) = path.parent() {
+                    tokio::fs::create_dir_all(parent).await.unwrap();
+                }
+                println!("Writing {} ({} bytes)", path.display(), row.data.len());
+                tokio::fs::write(path, row.data).await.unwrap();
+            }
+        }
+
+        let mut cmd = Command::new("deno");
+        cmd.arg("run").arg("-A").arg("main.ts");
+        cmd.current_dir(next_deploy.temp_path());
+        cmd.env("PORT", format!("{}", next_deploy.listen_port()));
+        unsafe {
+            cmd.pre_exec(|| {
+                let ret = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                if ret != 0 {
+                    panic!("prctl failed");
+                }
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn().unwrap();
+
+        // switch to the new revision
+        *deploy.write().unwrap() = next_deploy;
+
+        // kill the other child if any
+        if let Some(pid) = other_child_pid {
+            println!("Killing old child process {}", pid);
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
+        }
+
+        // mark us as "the other child"
+        other_child_pid = Some(child.id().unwrap());
+
+        tokio::spawn(async move {
+            child.wait().await.unwrap();
+        });
+    }
+}
+
+async fn proxy(deploy: Arc<RwLock<Deploy>>) {
     let listener = TcpListener::bind("0.0.0.0:8000").await.unwrap();
     let address = listener.local_addr().unwrap();
     println!("Actually listening on http://{address:?}");
 
     loop {
-        // proxy to port 3001
         let (mut downstream, addr) = listener.accept().await.unwrap();
-        println!("Accepted connection from {addr}");
+        let port = deploy.read().unwrap().listen_port();
+        println!("Routing {addr} to port {port}");
         tokio::spawn(async move {
-            let mut upstream = TcpStream::connect("127.0.0.1:3001").await.unwrap();
+            let mut upstream = TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .unwrap();
 
             tokio::io::copy_bidirectional(&mut downstream, &mut upstream)
                 .await
