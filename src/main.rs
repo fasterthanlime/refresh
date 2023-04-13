@@ -13,6 +13,7 @@ use axum::{
     Router,
 };
 use clap::{Parser, Subcommand};
+use futures::StreamExt;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sqlx::{
@@ -164,18 +165,26 @@ async fn api_post(State(pool): State<PgPool>, payload: Bytes) -> Response<Body> 
 
             let rows: Vec<Row> = {
                 let candidates_list = candidates.iter().map(|s| s.0.clone()).collect::<Vec<_>>();
-                sqlx::query_as("SELECT path_and_hash FROM files WHERE path_and_hash = ANY($1)")
-                    .bind(&candidates_list[..])
-                    .fetch_all(&pool)
-                    .await
-                    .unwrap()
+                sqlx::query_as(
+                    "
+                    SELECT path_and_hash
+                      FROM UNNEST($1) AS candidates(path_and_hash)
+                     WHERE NOT EXISTS (
+                        SELECT 1
+                          FROM files
+                         WHERE files.path_and_hash = candidates.path_and_hash
+                     )
+                    ",
+                )
+                .bind(&candidates_list[..])
+                .fetch_all(&pool)
+                .await
+                .unwrap()
             };
-
-            let present: HashSet<PathAndHash> = rows
+            let missing: Vec<PathAndHash> = rows
                 .into_iter()
                 .map(|r| PathAndHash(r.path_and_hash))
                 .collect();
-            let missing: Vec<PathAndHash> = candidates.difference(&present).cloned().collect();
 
             ApiResponse::ListMissingFiles { missing }
         }
@@ -367,6 +376,40 @@ async fn serve_fresh() {
                 .unwrap();
 
                 let path = Path::new(temp_path).join(pah.path());
+                if let Some(parent) = path.parent() {
+                    tokio::fs::create_dir_all(parent).await.unwrap();
+                }
+                println!("Writing {} ({} bytes)", path.display(), row.data.len());
+                tokio::fs::write(path, row.data).await.unwrap();
+            }
+        }
+
+        {
+            #[derive(FromRow)]
+            struct Row {
+                path_and_hash: String,
+                data: Vec<u8>,
+            }
+
+            let mut stream = sqlx::query_as::<_, Row>(
+                "
+                SELECT path_and_hash, data
+                  FROM files
+                  JOIN revision_files
+                    ON files.path_and_hash = revision_files.path_and_hash
+                  WHERE revision_id = (
+                    SELECT revision_id
+                      FROM latest_revision
+                     WHERE latest = 'yes'
+                  )
+                ",
+            )
+            .bind(&revision_id)
+            .fetch_many(&pool);
+
+            while let Some(row) = stream.next().await {
+                let row = row.unwrap().expect_right("must be row");
+                let path = Path::new(temp_path).join(PathAndHash(row.path_and_hash).path());
                 if let Some(parent) = path.parent() {
                     tokio::fs::create_dir_all(parent).await.unwrap();
                 }

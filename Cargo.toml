@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 axum = { version = "0.6.12", features = ["macros"] }
 clap = { version = "4.2.1", features = ["derive"] }
+futures = "0.3.28"
 ignore = "0.4.20"
 libc = "0.2.141"
 postcard = { version = "1.0.4", features = ["use-std"] }
