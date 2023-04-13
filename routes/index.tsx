@@ -5,18 +5,19 @@ export default function Home() {
   return (
     <>
       <Head>
-        <title>Silly idea</title>
+        <title>Dictionary</title>
       </Head>
       <div class="p-4 mx-auto max-w-screen-md">
-        <img
-          src="/logo.svg"
-          class="w-32 h-32"
-          alt="the fresh logo: a sliced lemon dripping with juice"
-        />
-        <p class="my-6">
-          Hi YouTube, we're now using tokio. And we have working deploys.
-        </p>
-        <Counter start={3} />
+        <div class="text-4xl text-center my-8">Dictionary</div>
+        <form action="/search" class="flex flex-1 items-center justify-center">
+          <input class="text-4xl border-2 rounded-lg" type="search" name="q" />
+          <input
+            class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
+            type="submit"
+            value="Search"
+            placeholder="Search for any English words"
+          />
+        </form>
       </div>
     </>
   );
